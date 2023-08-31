@@ -1,0 +1,93 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+library(tidyverse)
+library(dplyr)
+library(here)
+library(reshape2)
+library(stringr)
+
+library(devtools)
+for(pkg in c("dnet","dcGOR")){
+    if(pkg %in% rownames(installed.packages())) remove.packages(pkg)
+    install_github(repo=paste("hfang-bristol",pkg,sep="/"))
+}
+library(dcGOR)
+
+`%ni%` = Negate(`%in%`)
+```
+
+Protein domain data from IsoSeq
+```{r}
+domains <- read.csv(here::here("data/domain_analysis.csv"))
+domains_gained <- read.csv(here::here("data/domainsgained.csv"))
+
+domains_gained %>% 
+  dplyr::group_by(gained, AC) %>% 
+  dplyr::summarize(n = n())# %>% View()
+
+domains_gained$ID_version <- sapply(domains_gained$AC, function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1))
+
+
+domains_lost <- read.csv(here::here("data/domainslost.csv"))
+
+domains_lost %>% 
+  dplyr::group_by(lost, AC) %>% 
+  dplyr::summarize(n = n())# %>% View()
+
+domains_lost$ID_version <- sapply(domains_lost$AC, function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1))
+```
+
+gProfiler of genes with domain losses/gains
+```{r}
+library(gprofiler2)
+domains_gained$gene_id <- sapply(domains_gained$gene_id, function(x) str_split(x, "[.]") %>% purrr::map_chr(.,1))
+
+domain_gain_gprof <- list()
+for (cond in c("calb", "polyic", "saur", "lps")) {
+  go <- gprofiler2::gost(query = domains_gained$gene_id[domains_gained$condition_2 == cond],
+                       organism = "hsapiens", ordered_query = FALSE,
+                       multi_query = FALSE, significant = T, exclude_iea = FALSE,
+                       measure_underrepresentation = FALSE, evcodes = FALSE,
+                       user_threshold = 0.05, correction_method = "g_SCS",
+                       domain_scope = "annotated", custom_bg = NULL,
+                       numeric_ns = "", sources = c("GO:BP", "GO:CC", "GO:MF"), as_short_link = FALSE)
+  domain_gain_gprof <- rlist::list.append(
+    domain_gain_gprof,
+    go$result %>% mutate(condition = cond)
+  )
+}
+
+go <- gprofiler2::gost(query = domains_gained$gene_id %>% unique(),
+                       organism = "hsapiens", ordered_query = FALSE,
+                       multi_query = FALSE, significant = T, exclude_iea = FALSE,
+                       measure_underrepresentation = FALSE, evcodes = FALSE,
+                       user_threshold = 0.05, correction_method = "g_SCS",
+                       domain_scope = "annotated", custom_bg = NULL,
+                       numeric_ns = "", sources = c("GO:BP"), as_short_link = FALSE)
+
+go$result %>% subset(term_size > 100 & term_size < 500)
+
+go <- gprofiler2::gost(query = domains_lost$gene_id %>% unique(),
+                       organism = "hsapiens", ordered_query = FALSE,
+                       multi_query = FALSE, significant = T, exclude_iea = FALSE,
+                       measure_underrepresentation = FALSE, evcodes = FALSE,
+                       user_threshold = 0.05, correction_method = "g_SCS",
+                       domain_scope = "annotated", custom_bg = NULL,
+                       numeric_ns = "", sources = c("GO:BP"), as_short_link = FALSE)
+```
+
+GO term enrichment of gained domains
+```{r}
+res_gained <- dcGOR::dcEnrichment(
+  data = sapply(domains_gained$AC, function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1)) %>% unique(), 
+                           domain = "Pfam", 
+                           sizeRange = c(100, 500),
+                           ontology = c("GOMF"))
+
+res_gained_df <- dcGOR::view(res_gained, details=TRUE, top_num = NA) %>% subset(adjp < 0.05)
+write.csv(subset(res_gained_df, adjp < 0.01), here::here("output/res_gained_df.csv"))
+```

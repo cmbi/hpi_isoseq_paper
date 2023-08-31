@@ -1,0 +1,320 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(NOISeq)
+library(rlist)
+`%ni%` = Negate(`%in%`)
+```
+
+# Short read data
+Making a counts matrix
+```{r}
+phenodata <- read.delim(here::here("data/Phenodata.txt"))
+
+meta_24hr <- readRDS(here::here("data/meta_24hr.rda")) 
+
+files_24hr <- readRDS(here::here("data/files_24hr.rda"))
+
+colnames(meta_24hr) <- c("names", "stimulus", "time", "donor")
+meta_24hr$files <- files_24hr
+
+meta_24hr$include <- 0
+for (i in 1:nrow(phenodata)) {
+  if (length(meta_24hr$names[grep(phenodata$id[i], meta_24hr$names)]) > 0) {
+    meta_24hr$include[grep(phenodata$id[i], meta_24hr$names)] <- 1
+  }
+}
+stopifnot(nrow(subset(meta_24hr, include == 1)) == nrow(subset(phenodata, time == "24hrs")))
+meta_24hr <- subset(meta_24hr, include == 1)
+files_24hr <- files_24hr[files_24hr %in% meta_24hr$names]
+
+files_list <- list()
+for (file in files_24hr) {
+  f <- read.delim(file)
+  rownames(f) <- f$Name
+  out <- f %>% dplyr::select(NumReads) %>% 
+    round() %>% 
+    as.matrix()
+  colnames(out) <- str_split(str_split(file, "/")[[1]][11], "[.]")[[1]][1]
+  files_list <- list.append(files_list, out)
+}
+counts <- do.call(cbind, files_list) 
+counts <- counts[, grep("B", colnames(counts))] 
+saveRDS(counts, here::here("output/counts.rda"))
+write.csv(counts, here::here("output/counts.csv"))
+```
+
+Running NOISeq gene level
+```{r}
+counts <- readRDS(here::here("output/counts.rda"))
+counts <- as.data.frame(counts)
+dedup <- read.csv(here::here("data/dedup_group_mapping.csv"))
+
+library(rtracklayer)
+gtf <- rtracklayer::import(here::here("data/groupreps.gtf")) %>% as.data.frame()
+
+counts$gene <- NA
+for (i in 1:nrow(counts)) {
+  counts$gene[i] <- gtf$gene_id[gtf$transcript_id == rownames(counts)[i] & gtf$type == "transcript"]
+}
+rownames(counts) <- NULL
+counts <- counts %>% group_by(gene) %>% summarise(across(everything(), list(sum)))
+counts <- counts %>% tibble::column_to_rownames("gene")
+
+counts_24hr <- counts[, grep("24hr", colnames(counts))]
+keepFromddsHTSeq <- function(t, n){
+  keep <- rowSums(t) >= n
+  t[keep, ]
+  
+  #Alternative: only use genes for which none of the samples have less than 5 reads
+  #row_sub = apply(counts(ddsHTSeq), 1, function(row) any(row < 5))
+  #ddsHTSeq <- ddsHTSeq[!row_sub]
+}
+
+counts_noi <- counts_24hr %>% keepFromddsHTSeq(n = 5)
+
+factors <- as.data.frame(colnames(counts_noi)) %>% 
+  mutate(stimulus = stringr::str_split(colnames(counts_noi), "_") %>% map_chr(., 2)) %>% 
+  mutate(run = "R1") %>% 
+  mutate(time = ifelse(stringr::str_split(colnames(counts_noi), "_") %>% map_chr(., 3) == "repl",
+                       stringr::str_split(colnames(counts_noi), "_") %>% map_chr(., 4),
+                       stringr::str_split(colnames(counts_noi), "_") %>% map_chr(., 3))) %>% 
+  mutate(repl = ifelse(stringr::str_split(colnames(counts_noi), "_") %>% map_chr(., 3) == "repl",
+                       "repl",
+                       "no_repl"))
+
+noi <- NOISeq::readData(data = counts_noi, factors = factors)
+
+calb <- NOISeq::noiseq(noi, factor = "stimulus", conditions=c("Calbicans", "RPMI"), replicates = "biological", norm = 'tmm')
+saur <- NOISeq::noiseq(noi, factor = "stimulus", conditions=c("Saureus", "RPMI"), replicates = "biological", norm = 'tmm')
+lps <- NOISeq::noiseq(noi, factor = "stimulus", conditions=c("LPS", "RPMI"), replicates = "biological", norm = 'tmm')
+polyic <- NOISeq::noiseq(noi, factor = "stimulus", conditions=c("PolyIC", "RPMI"), replicates = "biological", norm = 'tmm')
+
+noiseq_sr <- list(calb, saur, lps, polyic)
+saveRDS(noiseq_sr, here::here("output/noiseq_gene_sr.rda"))
+
+noiseq_sr <- readRDS(here::here("output/noiseq_gene_sr.rda"))
+saveRDS(noiseq_sr[[1]], here::here("output/diff_gene_calb_sr.rda"))
+saveRDS(noiseq_sr[[2]], here::here("output/diff_gene_saur_sr.rda"))
+saveRDS(noiseq_sr[[3]], here::here("output/diff_gene_lps_sr.rda"))
+saveRDS(noiseq_sr[[4]], here::here("output/diff_gene_polyic_sr.rda"))
+```
+
+Loading NOISeq SR again
+```{r}
+calb_gene <- readRDS(here::here("output/diff_gene_calb_sr.rda"))@results[[1]] %>% tibble::rownames_to_column("X")
+saur_gene <- readRDS(here::here("output/diff_gene_saur_sr.rda"))@results[[1]] %>% tibble::rownames_to_column("X")
+lps_gene <- readRDS(here::here("output/diff_gene_lps_sr.rda"))@results[[1]] %>% tibble::rownames_to_column("X")
+polyic_gene <- readRDS(here::here("output/diff_gene_polyic_sr.rda"))@results[[1]] %>% tibble::rownames_to_column("X")
+
+noiseq_gene <- list(calb_gene, saur_gene, lps_gene, polyic_gene)
+lapply(noiseq_gene, function(x) subset(x, prob >= 0.95) %>% nrow())
+```
+
+# Long read data
+Running NOISeq for the long read data
+```{r}
+counts_lr <- read_tsv(here::here("data/grouped_rawcounts.tsv"))
+dedup <- read.csv(here::here("data/dedup_group_mapping.csv"))
+
+library(rtracklayer)
+gtf <- rtracklayer::import(here::here("data/groupreps.gtf")) %>% as.data.frame()
+
+counts_lr$gene <- NA
+for (i in 1:nrow(counts_lr)) {
+  counts_lr$gene[i] <- gtf$gene_id[gtf$transcript_id == counts_lr$rep[i] & gtf$type == "transcript"]
+}
+counts_lr$rep <- NULL
+counts_lr <- counts_lr %>% group_by(gene) %>% summarise(across(everything(), list(sum)))
+counts_lr <- counts_lr %>% tibble::column_to_rownames("gene")
+
+counts_noi_lr <- counts_lr %>% keepFromddsHTSeq(n = 5)
+colnames(counts_noi_lr) <- c("calb", "lps", "polyic", "rpmi", "saur")
+factors <- colnames(counts_noi_lr) %>% as.data.frame()
+colnames(factors) <- "stimulus"
+
+noi <- NOISeq::readData(data = counts_noi_lr, factors = as.data.frame(factors))
+
+calb <- NOISeq::noiseq(noi, factor = "stimulus", conditions=c("calb", "rpmi"), replicates = "no", norm = 'tmm')
+saur <- NOISeq::noiseq(noi, factor = "stimulus", conditions=c("saur", "rpmi"), replicates = "no", norm = 'tmm')
+lps <- NOISeq::noiseq(noi, factor = "stimulus", conditions=c("lps", "rpmi"), replicates = "no", norm = 'tmm')
+polyic <- NOISeq::noiseq(noi, factor = "stimulus", conditions=c("polyic", "rpmi"), replicates = "no", norm = 'tmm')
+
+write.csv(calb@results[[1]], here::here("output/diff_gene_calb_lr.csv"))
+write.csv(saur@results[[1]], here::here("output/diff_gene_saur_lr.csv"))
+write.csv(lps@results[[1]], here::here("output/diff_gene_lps_lr.csv"))
+write.csv(polyic@results[[1]], here::here("output/diff_gene_polyic_lr.csv"))
+
+isoseq_gene_calb <- read.csv(here::here("output/diff_gene_calb_lr.csv"))
+isoseq_gene_saur <- read.csv(here::here("output/diff_gene_saur_lr.csv"))
+isoseq_gene_lps <- read.csv(here::here("output/diff_gene_lps_lr.csv"))
+isoseq_gene_polyic <- read.csv(here::here("output/diff_gene_polyic_lr.csv"))
+```
+
+Correlation plots
+```{r}
+###CAlb
+calb_gene_joined <- full_join(isoseq_gene_calb %>% mutate(M = -M), 
+                                    calb_gene %>% subset(prob >= 0.95), 
+                                    by = "X") %>% 
+  subset(!is.na(Calbicans_mean)) %>% 
+  subset(!is.na(calb_mean))
+
+calb_gene_joined %>% 
+  ggplot(aes(x = -M.x, y = M.y)) +
+  geom_point(size = 0.1) +
+  geom_smooth(method = "lm") +
+  labs(x = "lr_gene_log2fc", y = "sr_gene_log2fc") +
+  ggtitle("CAlb") +
+  theme(text = element_text(size = 19))
+
+ggsave(here::here("figures/calb_lrsr_correlation_gene.png"), 
+       device = "png", height = 9, width = 9, plot = last_plot(), dpi = 300)
+
+lm(M.x ~ M.y, calb_gene_joined) %>% summary()
+
+write_csv(calb_gene_joined, here::here("output/validation_calb_gene_joined_lr_sr.csv"))
+
+###SAur
+saur_gene_joined <- full_join(isoseq_gene_saur %>% mutate(M = -M), 
+                                    saur_gene %>% subset(prob >= 0.95), 
+                                    by = "X") %>% 
+  subset(!is.na(Saureus_mean)) %>% 
+  subset(!is.na(saur_mean))
+
+saur_gene_joined %>% 
+  ggplot(aes(x = -M.x, y = M.y)) +
+  geom_point(size = 0.1) +
+  geom_smooth(method = "lm") +
+  labs(x = "lr_gene_log2fc", y = "sr_gene_log2fc") +
+  ggtitle("SAur") +
+  theme(text = element_text(size = 19))
+
+ggsave(here::here("figures/saur_lrsr_correlation_gene.png"), 
+       device = "png", height = 9, width = 9, plot = last_plot(), dpi = 300)
+
+lm(M.x ~ M.y, saur_gene_joined) %>% summary()
+
+write_csv(saur_gene_joined, here::here("output/validation_saur_gene_joined_lr_sr.csv"))
+
+###LPS
+lps_gene_joined <- full_join(isoseq_gene_lps %>% mutate(M = -M), 
+                                    lps_gene %>% subset(prob >= 0.95), 
+                                    by = "X") %>% 
+  subset(!is.na(LPS_mean)) %>% 
+  subset(!is.na(lps_mean))
+
+lps_gene_joined %>% 
+  ggplot(aes(x = -M.x, y = M.y)) +
+  geom_point(size = 0.1) +
+  geom_smooth(method = "lm") +
+  labs(x = "lr_gene_log2fc", y = "sr_gene_log2fc") +
+  ggtitle("LPS") + 
+  theme(text = element_text(size = 19))
+
+ggsave(here::here("figures/lps_lrsr_correlation_gene.png"), 
+       device = "png", height = 9, width = 9, plot = last_plot(), dpi = 300)
+
+lm(M.x ~ M.y, lps_gene_joined) %>% summary()
+
+write_csv(lps_gene_joined, here::here("output/validation_lps_gene_joined_lr_sr.csv"))
+
+###PolIC
+polyic_gene_joined <- full_join(isoseq_gene_polyic %>% mutate(M = -M), 
+                                    polyic_gene %>% subset(prob >= 0.95), 
+                                    by = "X") %>% 
+  subset(!is.na(PolyIC_mean)) %>% 
+  subset(!is.na(polyic_mean))
+
+polyic_gene_joined %>% 
+  ggplot(aes(x = -M.x, y = M.y)) +
+  geom_point(size = 0.1) +
+  geom_smooth(method = "lm") +
+  labs(x = "lr_gene_log2fc", y = "sr_gene_log2fc") +
+  ggtitle("Poly(I:C)") + 
+  theme(text = element_text(size = 19))
+
+ggsave(here::here("figures/polyic_lrsr_correlation_gene.png"), 
+       device = "png", height = 9, width = 9, plot = last_plot(), dpi = 300)
+
+lm(M.x ~ M.y, polyic_gene_joined) %>% summary()
+
+write_csv(polyic_gene_joined, here::here("output/validation_polyic_gene_joined_lr_sr.csv"))
+```
+
+Correlation matrix
+```{r}
+comb_corr <- data.frame(row.names = c("calb", "saur", "lps", "polyic"))
+
+comb_corr$calb <- c(
+  summary(lm(M.x ~ M.y, data = calb_gene_joined))$r.squared,
+  summary(lm(M.x ~ M.y, data = 
+               full_join(
+                 isoseq_gene_calb %>% mutate(M = -M), 
+                 saur_gene %>% subset(prob >= 0.95), 
+                 by = "X") %>% subset(!is.na(Saureus_mean) & !is.na(calb_mean))))$r.squared,
+  summary(lm(M.x ~ M.y, data = 
+               full_join(
+                 isoseq_gene_calb %>% mutate(M = -M), 
+                 lps_gene %>% subset(prob >= 0.95), 
+                 by = "X") %>% subset(!is.na(LPS_mean) & !is.na(calb_mean))))$r.squared,
+  summary(lm(M.x ~ M.y, data = 
+               full_join(
+                 isoseq_gene_calb %>% mutate(M = -M), 
+                 polyic_gene %>% subset(prob >= 0.95), 
+                 by = "X") %>% subset(!is.na(PolyIC_mean) & !is.na(calb_mean))))$r.squared
+)
+
+comb_corr$saur <- c(
+  NA,
+  summary(lm(M.x ~ M.y, data = saur_gene_joined))$r.squared,
+  summary(lm(M.x ~ M.y, data = 
+               full_join(
+                 isoseq_gene_saur %>% mutate(M = -M), 
+                 lps_gene %>% subset(prob >= 0.95), 
+                 by = "X") %>% subset(!is.na(LPS_mean) & !is.na(saur_mean))))$r.squared,
+  summary(lm(M.x ~ M.y, data = 
+               full_join(
+                 isoseq_gene_saur %>% mutate(M = -M), 
+                 polyic_gene %>% subset(prob >= 0.95), 
+                 by = "X") %>% subset(!is.na(PolyIC_mean) & !is.na(saur_mean))))$r.squared
+)
+
+comb_corr$lps <- c(
+  NA,
+  NA,
+  summary(lm(M.x ~ M.y, data = lps_gene_joined))$r.squared,
+  summary(lm(M.x ~ M.y, data = 
+               full_join(
+                 isoseq_gene_lps %>% mutate(M = -M), 
+                 polyic_gene %>% subset(prob >= 0.95), 
+                 by = "X") %>% subset(!is.na(PolyIC_mean) & !is.na(lps_mean))))$r.squared
+)
+
+comb_corr$polyic <- c(
+  NA,
+  NA,
+  NA,
+  summary(lm(M.x ~ M.y, data = polyic_gene_joined))$r.squared
+)
+
+library(pheatmap)
+library(RColorBrewer)
+
+png(here::here("figures/switchup_correlation_gene_level.png"),  height = 9, width = 10, units = "in", res = 300)
+
+pheatmap(comb_corr, display_numbers = T, cluster_rows = F, cluster_cols = F,
+         col = colorRampPalette(brewer.pal(8, "Blues"))(256),
+         fontsize = 16,
+         number_color = "black"
+         )
+dev.off()
+
+write_csv(comb_corr, here::here("output/validation_comb_corr_lr_sr.csv"))
+```

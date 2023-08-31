@@ -1,0 +1,365 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(here)
+library(reshape2)
+library(stringr)
+library(clipr)
+#library(gridGraphviz)
+
+`%ni%` = Negate(`%in%`)
+```
+
+Protein domain data from IsoSeq
+```{r}
+domains <- read.csv(here::here("isoseq/data/domains_19012023/domain_analysis.csv"))
+domains_gained <- read.csv(here::here("isoseq/data/domains_19012023/domainsgained.csv"))
+
+domains_gained %>% 
+  dplyr::group_by(gained, AC) %>% 
+  dplyr::summarize(n = n())# %>% View()
+
+domains_gained$ID_version <- sapply(domains_gained$AC, function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1))
+
+
+domains_lost <- read.csv(here::here("isoseq/data/domains_19012023/domainslost.csv"))
+
+domains_lost %>% 
+  dplyr::group_by(lost, AC) %>% 
+  dplyr::summarize(n = n())# %>% View()
+
+domains_lost$ID_version <- sapply(domains_lost$AC, function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1))
+```
+
+gProfiler of genes with domain losses/gains
+```{r}
+library(gprofiler2)
+domains_gained$gene_id <- sapply(domains_gained$gene_id, function(x) str_split(x, "[.]") %>% purrr::map_chr(.,1))
+
+domain_gain_gprof <- list()
+for (cond in c("calb", "polyic", "saur", "lps")) {
+  go <- gprofiler2::gost(query = domains_gained$gene_id[domains_gained$condition_2 == cond],
+                       organism = "hsapiens", ordered_query = FALSE,
+                       multi_query = FALSE, significant = T, exclude_iea = FALSE,
+                       measure_underrepresentation = FALSE, evcodes = FALSE,
+                       user_threshold = 0.05, correction_method = "g_SCS",
+                       domain_scope = "annotated", custom_bg = NULL,
+                       numeric_ns = "", sources = c("GO:BP", "GO:CC", "GO:MF"), as_short_link = FALSE)
+  domain_gain_gprof <- rlist::list.append(
+    domain_gain_gprof,
+    go$result %>% mutate(condition = cond)
+  )
+}
+
+venn::venn(sapply(domain_gain_gprof, function(x) return(x$term_name)))
+
+library(VennDiagram)
+overlap <- calculate.overlap(sapply(domain_gain_gprof, function(x) return(x$term_name)))
+
+do.call(rbind, domain_gain_gprof) %>% View()
+
+go <- gprofiler2::gost(query = domains_gained$gene_id %>% unique(),
+                       organism = "hsapiens", ordered_query = FALSE,
+                       multi_query = FALSE, significant = T, exclude_iea = FALSE,
+                       measure_underrepresentation = FALSE, evcodes = FALSE,
+                       user_threshold = 0.05, correction_method = "g_SCS",
+                       domain_scope = "annotated", custom_bg = NULL,
+                       numeric_ns = "", sources = c("GO:BP"), as_short_link = FALSE)
+
+go <- gprofiler2::gost(query = domains_lost$gene_id %>% unique(),
+                       organism = "hsapiens", ordered_query = FALSE,
+                       multi_query = FALSE, significant = T, exclude_iea = FALSE,
+                       measure_underrepresentation = FALSE, evcodes = FALSE,
+                       user_threshold = 0.05, correction_method = "g_SCS",
+                       domain_scope = "annotated", custom_bg = NULL,
+                       numeric_ns = "", sources = c("GO:BP"), as_short_link = FALSE)
+```
+
+Domain gain and loss counts for immune and non-immune genes
+```{r}
+domains_gained$gained <- as.factor(domains_gained$gained)
+domains_gained %>% 
+  group_by(gained) %>% 
+  dplyr::summarize(n = n()) %>% 
+  ggplot(aes(x = forcats::fct_reorder(gained, -n), y = n)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+imm.ass <- readRDS(here::here("gene_lists/imm.ass.rda"))
+domains_gained %>% 
+  mutate(set = ifelse(gene_name %in% imm.ass$geneName,
+                      "immune",
+                      "non_immune")) %>% 
+  group_by(gained, set, condition_2) %>% 
+  dplyr::summarize(n = n()) %>% 
+  ggplot(aes(x = forcats::fct_reorder(gained, -n), y = n, fill = set)) +
+  geom_col() +
+  facet_grid(condition_2~.) +
+  scale_fill_viridis_d() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
+        text = element_text(size = 16),
+        legend.position = "top")
+```
+
+
+Protein domain-GO term association with dcGOR
+```{r}
+library(devtools)
+for(pkg in c("dnet","dcGOR")){
+    if(pkg %in% rownames(installed.packages())) remove.packages(pkg)
+    install_github(repo=paste("hfang-bristol",pkg,sep="/"))
+}
+library(dcGOR)
+```
+
+```{r}
+## 1) prepare input and output files
+### input files
+anno.file <- "http://dcgor.r-forge.r-project.org/data/Algo/HP_anno.txt"
+architecture.file <- "http://dcgor.r-forge.r-project.org/data/Algo/SCOP_architecture.txt"
+### output files
+output.file <- "sf2HPPA.txt"
+RData.HIS.customised <- "sf2HPPA.HIS.RData"
+## 2) apply dcGO algorithm to infer domain-centric ontology
+res <- dcAlgo(anno.file, architecture.file, output.file, ontology="HPPA", feature.mode="supra", fdr.cutoff=0.05, parallel=FALSE)
+
+res_RData <- dcAlgoPropagate(input.file=output.file, ontology="HPPA", output.file=RData.HIS.customised)
+
+domain <- "PF00096"
+dcGOR::dcAlgo()
+
+SCOP.sf <- dcRDataLoader('SCOP.sf')
+data <- sample(rowNames(SCOP.sf), 50)
+eoutput <- dcEnrichment(data, domain="SCOP.sf", ontology="GOMF")
+view(eoutput, top_num=10, sortBy="pvalue", details=TRUE)
+visEnrichment(eoutput)
+
+Pfam <- dcRDataLoader('Pfam')
+data <- sample(rowNames(Pfam), 100)
+eoutput <- dcEnrichment(data, domain="Pfam", ontology="GOMF")
+
+res <- dcGOR::dcEnrichment(data = c("PF00096", "PF00076", "PF08028", "PF00441", "PF00005", "PF05822", "PF14836", "PF02984", "PF00023", "PF00443", "PF00970", "PF00175", "PF13606", "PF00134", "PF00400", "PF00619", "PF00271", "PF02770", "PF00656", "PF03009"), 
+                           domain = "Pfam", 
+                           ontology = c("GOBP"))
+visEnrichment(res)
+view(res, top_num=10, sortBy="pvalue", details=TRUE)
+```
+
+GO term enrichment of gained domains
+```{r}
+venn::venn(list(domains_gained$gene_name[domains_gained$condition_2 == "calb"],
+           domains_gained$gene_name[domains_gained$condition_2 == "polyic"],
+           domains_gained$gene_name[domains_gained$condition_2 == "lps"],
+           domains_gained$gene_name[domains_gained$condition_2 == "saur"]))
+
+domain_gain_overlap <- VennDiagram::calculate.overlap(list(
+  domains_gained$gene_name[domains_gained$condition_2 == "calb"],
+  domains_gained$gene_name[domains_gained$condition_2 == "polyic"],
+  domains_gained$gene_name[domains_gained$condition_2 == "lps"],
+  domains_gained$gene_name[domains_gained$condition_2 == "saur"]))
+
+res_gained <- dcGOR::dcEnrichment(
+  data = sapply(domains_gained$AC, function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1)), 
+                           domain = "Pfam", 
+                           sizeRange = c(100, 500),
+                           ontology = c("GOMF"))
+
+figure <- visEnrichment(res_gained) 
+
+png(file = here::here("isoseq/figures/domains/domain_gained_go_terms.png"),  
+    width = 10, height = 10,
+    units = "in", res = 300) 
+gridGraphviz::grid.graph(figure, newpage = FALSE, nodesOnTop = TRUE)
+dev.off()
+
+res_gained_df <- dcGOR::view(res_gained, details=TRUE, top_num = NA) #%>% clipr::write_clip()
+write.csv(res_gained_df, here::here("isoseq/output/res_gained_df.csv"))
+
+
+res_gained_mf <- dcGOR::dcEnrichment(data = sapply(domains_gained$AC, function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1)), 
+                           domain = "Pfam", 
+                           ontology = c("GOMF"))
+res_gained_mf_df <- dcGOR::view(res_gained_mf, details=TRUE) #%>% clipr::write_clip()
+```
+
+
+```{r}
+sapply(res_gained_df$members, function(x) stringr::str_split(x, ",") %>% purrr::map_chr(.,1))
+subset(domains_gained, ID_version %in% sapply(res_gained_df$members, function(x) stringr::str_split(x, ",") %>% purrr::map_chr(.,1))) %>% View
+all(sapply(domains_gained$members, function(x) stringr::str_split(x, ",") %>% purrr::map_chr(.,1)) %in% domains_lost$ID_version)
+```
+
+GO term enrichment of lost domains
+```{r}
+res_lost <- dcGOR::dcEnrichment(data = sapply(domains_lost$AC, function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1)), 
+                           domain = "Pfam", 
+                           sizeRange = c(100, 500),
+                           ontology = c("GOBP"))
+
+figure <- dcGOR::visEnrichment(res_lost) 
+
+png(file = here::here("isoseq/figures/domains/domain_lost_go_terms.png"),  
+    width = 10, height = 10,
+    units = "in", res = 300) 
+gridGraphviz::grid.graph(figure, newpage = FALSE, nodesOnTop = TRUE)
+dev.off()
+
+
+res_lost_df <- dcGOR::view(res_lost, details=TRUE, top_num = NA) #%>% clipr::write_clip()
+write.csv(res_lost_df, here::here("isoseq/output/res_lost_df.csv"))
+
+res_lost_mf <- dcGOR::dcEnrichment(data = sapply(domains_lost$AC, function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1)), 
+                           domain = "Pfam", 
+                           ontology = c("GOMF"))
+res_lost_mf_df <- dcGOR::view(res_lost_mf, details=TRUE) #%>% clipr::write_clip()
+```
+
+Checking out what proteins are losing electron transport domains
+```{r}
+sapply(res_lost_df$members, function(x) stringr::str_split(x, ",") %>% purrr::map_chr(.,1))
+subset(domains_lost, ID_version %in% as.vector(unlist(sapply(res_lost_df$members, function(x) stringr::str_split(x, ",")))))
+subset(domains_lost, ID_version %in% as.vector(unlist(sapply(res_lost_df$members, function(x) stringr::str_split(x, ",")))))$gene_name
+all(sapply(res_lost_df$members, function(x) stringr::str_split(x, ",")) %>% unlist() %>% as.vector() %in% domains_lost$ID_version)
+```
+
+Translating between pfam domains and gene ontology with pfam2go (from https://supfam.mrc-lmb.cam.ac.uk/SUPERFAMILY/cgi-bin/dcdownload.cgi)
+```{r}
+pfam_go <- read.delim(here::here("isoseq/data/supfam/pfam2go_mf.txt"))
+
+unique(domains_gained$AC)
+gained <- sapply(unique(domains_gained$AC), function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1)) %>% unlist() %>% as.vector()
+all(gained %in% pfam_go$PFAM)
+
+subset(pfam_go, PFAM %in% gained) %>% subset(Information_content > 3) %>% View()
+
+#gained <- as.data.frame(gained)
+subset(pfam_go, PFAM %in% gained) %>% subset(Information_content > 3) %>% group_by(GO_name) %>% dplyr::summarize(n = n(), Information_content, PFAM) %>% View
+
+info_threshold <- 1
+domains_gained$go <- NA
+
+for (i in 1:nrow(domains_gained)) {
+  if (domains_gained$ID_version[i] %in% pfam_go$PFAM) {
+    go_association <- pfam_go$GO_name[pfam_go$PFAM == domains_gained$ID_version[i] & pfam_go$Information_content > info_threshold]
+    if (length(go_association) != 0) {
+      domains_gained$go[i] <-  toString(as.list(go_association)) 
+    }
+  }
+}
+
+domains_gained$go_top <- NA
+for (i in 1:nrow(domains_gained)) {
+  if (domains_gained$ID_version[i] %in% pfam_go$PFAM) {
+    sub <- subset(pfam_go, PFAM == domains_gained$ID_version[i]) 
+    go_association <- sub$GO_name[sub$Information_content == max(sub$Information_content)]
+  
+    if (length(go_association) != 0) {
+      domains_gained$go_top[i] <-  toString(as.list(go_association)) 
+    }
+  }
+}
+library(scales)
+domains_gained$go_top <- as.factor(domains_gained$go_top)
+domains_gained %>% 
+  subset(!is.na(go_top)) %>% 
+  dplyr::group_by(go_top, condition_2) %>% 
+  dplyr::summarize(n = n()) %>% 
+  ggplot(aes(y = forcats::fct_reorder(go_top, -n), x = n, fill = condition_2)) +
+  geom_col(position = "dodge") +
+  scale_y_discrete(labels = label_wrap(40)) 
+  #facet_wrap(~condition_2, ncol = 2, scales = "free")
+```
+
+```{r}
+pfam_go %>% 
+  subset(Information_content > 2 & Information_content < 2.2) %>% 
+  group_by(PFAM) %>% 
+  dplyr::summarize(n = n()) %>% 
+  ggplot(aes(x = n)) +
+  geom_density()
+
+pfam_go %>% 
+  group_by(PFAM) %>% 
+  dplyr::summarize(n = n()) %>% 
+  subset(n)
+
+pfam_go %>% 
+  subset(Information_content > 2 & Information_content < 2.2) %>% 
+  group_by(GO_ID) %>% 
+  dplyr::summarize(n = n(), GO_name) %>% 
+  unique() %>% 
+  View()
+
+sdfo <- read.delim(here::here("isoseq/data/supfam/SDFO.both.txt"))
+
+sdfo %>% 
+  group_by(SDFO_level) %>% 
+  dplyr::summarize(n = n())
+
+informative_go <- subset(sdfo, SDFO_level == "Highly  Informative")$GO_id %>% unique()
+
+pfam_go %>% 
+  subset(GO_ID %in% med_informative_go) %>% 
+  group_by(GO_ID) %>% 
+  dplyr::summarize(n = n(), GO_name) %>% unique() %>% View()
+
+gained <- sapply(unique(domains_gained$AC), function(x) stringr::str_split(x, "[.]") %>% purrr::map_chr(.,1)) %>% unlist() %>% as.vector()
+
+t <- subset(pfam_go, PFAM %in% gained) %>% 
+  subset(GO_ID %in% informative_go) %>% 
+  group_by(GO_name) %>% 
+  dplyr::summarize(n = n()) 
+t$GO_name <- as.factor(t$GO_name)
+t %>% 
+  subset(n > 5) %>% 
+  ungroup() %>% 
+  ggplot(aes(y = forcats::fct_reorder(GO_name, n), x = n)) +
+  geom_col(stat="identity")
+
+```
+
+Normalizing the occurence of domain counts by their GO-domain association number
+```{r}
+pfam_go_count <- pfam_go %>% 
+  group_by(PFAM) %>% 
+  dplyr::summarize(n_go = n())
+
+pfam_count <- domains_gained %>% 
+  group_by(ID_version) %>% 
+  dplyr::summarize(n = n())
+
+colnames(pfam_count)[1] <- "PFAM"
+
+full_join(pfam_go_count, pfam_count, by = "PFAM") %>% 
+  subset(!is.na(n)) %>%
+  mutate(rel = n / n_go) %>% 
+  View()
+```
+
+There is also a file from GO themselves, which maps pfam domains to GO terms
+```{r}
+pfamtogo <- read.delim(here::here("isoseq/data/go/pfam2go.txt"), sep = ";", header = F)
+colnames(pfamtogo) <- c("domain", "go")
+pfamtogo$pfam <- sapply(pfamtogo$domain, function(x) str_split(x, " ") %>% purrr::map_chr(.,1))
+pfamtogo$pfam <- sapply(pfamtogo$pfam, function(x) str_split(x, ":") %>% purrr::map_chr(.,2))
+
+pfamtogo$go_desc <- sapply(pfamtogo$domain, function(x) str_split(x, ">") %>% purrr::map_chr(.,2))
+```
+
+```{r}
+any(unique(domains_gained$ID_version) %in% pfamtogo$pfam)
+length(unique(domains_gained$ID_version)[unique(domains_gained$ID_version) %in% pfamtogo$pfam])
+subset(pfamtogo, pfam == "PF00641")
+
+colnames(domains_gained)[colnames(domains_gained) == "ID_version"] <- "pfam"
+domains_gained_go <- left_join(domains_gained, pfamtogo, by = "pfam")
+```
+
+
