@@ -15,7 +15,7 @@ dg_polyic=pd.read_csv('analysis/noiseq/diff_gene_polyic_50cpm.csv').rename({'Unn
 for d in [dg_alb,dg_aur,dg_lps,dg_polyic]:
     d['gene']=d.gid.apply(lambda x: x.split('.',1)[0])
 
-#%% new pathway analysis - split up and down
+#%% split up and downregulated subsets and combine afterwards
 pathways=[]
 for stimulus in [dg_lps,dg_aur,dg_alb,dg_polyic]:
     dg_up_stim,dg_down_stim=stimulus[stimulus.M>0],stimulus[stimulus.M<0]

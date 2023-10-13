@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from gtfparse import read_gtf
 import numpy as np
 plt.rcParams.update({'font.size': 24})
-#%%
+#%% read files from isoformswitchanalyzeR
 switches=pd.read_csv('/mnt/xomics/renees/data/host_pathogen_PID/pbmc_isoseq/analysis/isoformswitchR/switch_consequence.csv')
 switches=switches.dropna(subset=['isoformsDifferent'])
 switches_diff=switches[switches['isoformsDifferent']]
@@ -19,7 +19,6 @@ switches_diff.switchConsequence.value_counts().plot.bar(figsize=(8,8))
 switches_diff[['condition_2','isoformUpregulated','isoformDownregulated']].groupby(['condition_2','isoformUpregulated','isoformDownregulated']).agg(len).reset_index().rename({0:'num_cons'},axis=1).sort_values('num_cons',ascending=False).drop_duplicates(subset=['isoformUpregulated','isoformDownregulated'])['num_cons'].value_counts().plot.bar()
 plt.xlabel('max # consequences in an IS')
 plt.ylabel('# isoform switches')
-
 
 #%% number of switches per gene
 ispg=switches_diff[['gene_id','condition_2','isoformUpregulated','isoformDownregulated']].drop_duplicates().groupby(['condition_2','gene_id']).agg(list)
@@ -34,7 +33,7 @@ isofeat[(isofeat.switchConsequencesGene==True)&(~isofeat['isoform_id'].isin(swit
 plt.xlabel('dIF')
 plt.legend()
 
-#%% how often is a isoform switch involving a novel transcript
+#%% how often is a isoform switch involving a novel transcript - Figure 4D
 def typeswitch(up,down):
     if '.n' in up and '.n' in down:
         return('both novel')
@@ -51,7 +50,7 @@ plt.ylabel('# isoform switches',fontsize=22)
 plt.tight_layout()
 # plt.savefig('/mnt/xomics/renees/data/host_pathogen_PID/figures/novel_is.pdf')
 
-#%% what effects of switch involving a novel transcript
+#%% what effects of switch involving a novel transcript - Figure 4D
 plt.style.use('default')
 normed_effects=pd.crosstab(switches_diff.merge(df)['type_switch'],switches_diff.merge(df)['switchConsequence'],normalize='index').T
 normed_effects['max']=normed_effects.max(axis=1)
@@ -74,7 +73,7 @@ dgain_genep=dgain_genep[(dgain_genep['term_size']>100)&(dgain_genep['term_size']
 dgain_genep['enrichment']=(dgain_genep['intersection_size']/dgain_genep['query_size'])/(dgain_genep['term_size']/dgain_genep['effective_domain_size'])
 dgain_genep[['enrichment','name']].set_index('name').sort_values(by='enrichment',ascending=False).head(20).plot.barh(figsize=(5,8),fontsize=22)
 
-#%%
+#%% Pathway analyses on isoform switch sub-types
 domainswitch_loss=switches_diff[switches_diff['switchConsequence']=='Domain loss']
 domainswitch_loss=domainswitch_loss.merge(domainswitch_loss.merge(domain,left_on='isoformDownregulated',right_on='isoform_id')[['isoform_id','hmm_name']].groupby('isoform_id').agg(lambda x: set(x)),left_on='isoformDownregulated',right_index=True,how='left',suffixes=('','_down')).merge(domainswitch_loss.merge(domain[['isoform_id','hmm_name']],left_on='isoformUpregulated',right_on='isoform_id')[['isoform_id','hmm_name']].groupby('isoform_id').agg(lambda x: set(x)),left_on='isoformUpregulated',right_index=True,how='left',suffixes=('','_up'))
 domainswitch_loss['hmm_name_up']=domainswitch_loss['hmm_name_up'].fillna('').apply(lambda x: set(x))
@@ -84,14 +83,14 @@ dloss_genep=GProfiler(return_dataframe=True).profile(organism='hsapiens',query=l
 #dloss_genep=dloss_genep[(dloss_genep['term_size']>100)&(dloss_genep['term_size']<500)]
 dloss_genep['enrichment']=(dloss_genep['intersection_size']/dloss_genep['query_size'])/(dloss_genep['term_size']/dloss_genep['effective_domain_size'])
 dloss_genep[['enrichment','name']].set_index('name').sort_values(by='enrichment',ascending=False).head(20).plot.barh(figsize=(8,8),fontsize=22)
-#%%
+
 nmdinsensitive=switches_diff[switches_diff.switchConsequence=='NMD insensitive']
 nmdinsensitive['gene']=nmdinsensitive['gene_id'].apply(lambda x: x.split('.',1)[0])
 nmd_genep=GProfiler(return_dataframe=True).profile(organism='hsapiens',query=list(nmdinsensitive['gene'].unique()))
 nmd_genep=nmd_genep[(nmd_genep['term_size']>100)&(nmd_genep['term_size']<500)]
 nmd_genep['enrichment']=(nmd_genep['intersection_size']/nmd_genep['query_size'])/(nmd_genep['term_size']/nmd_genep['effective_domain_size'])
 nmd_genep[['enrichment','name']].set_index('name').sort_values(by='enrichment',ascending=False).head(20).plot.barh(figsize=(10,10),fontsize=22)
-#%%
+
 orflen=switches_diff[switches_diff.switchConsequence=='ORF is longer']
 orflen['gene']=orflen['gene_id'].apply(lambda x: x.split('.',1)[0])
 orflen_genep=GProfiler(return_dataframe=True).profile(organism='hsapiens',query=list(orflen['gene'].unique()))
@@ -126,8 +125,6 @@ ir_genep=ir_genep[(ir_genep['term_size']>100)&(ir_genep['term_size']<500)]
 ir_genep['enrichment']=(ir_genep['intersection_size']/ir_genep['query_size'])/(ir_genep['term_size']/ir_genep['effective_domain_size'])
 ir_genep[['enrichment','name']].set_index('name').sort_values(by='enrichment',ascending=False).head(20).plot.barh(figsize=(10,10),fontsize=22)
 
-#reactome only
-ir_genep[ir_genep.source=='REAC'][['enrichment','name']].set_index('name').sort_values(by='enrichment',ascending=False).head(20).plot.barh(figsize=(10,10),fontsize=22)
 #%%
 #what about those IS that didn't have DE on gene level
 switches=switches.dropna(subset=['switchConsequence'])
